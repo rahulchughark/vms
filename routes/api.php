@@ -2,6 +2,7 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\EmployeeController;
 use App\Http\Controllers\Api\VisitorController;
 use Illuminate\Support\Facades\Mail;
 
@@ -24,6 +25,7 @@ Route::get('/test', function () {
 
 Route::middleware('auth:sanctum')->group(function () {
 Route::post('/logout', [AuthController::class, 'logout']);
+Route::get('/employees', [EmployeeController::class, 'index']);
 Route::post('/visitors', [VisitorController::class, 'store']);
 Route::get('/visitors', [VisitorController::class, 'index']);
 Route::get('/visitors-list', [VisitorController::class, 'visitorsList']);

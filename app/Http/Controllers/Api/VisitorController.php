@@ -368,7 +368,6 @@ class VisitorController extends Controller
         }
 
         
-
         // Handle visitor_id_proof upload to public folder
         if ($request->hasFile('visitor_id_proof')) {
             $file = $request->file('visitor_id_proof');
