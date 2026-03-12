@@ -318,7 +318,14 @@ class VisitorController extends Controller
      */
     public function store(Request $request)
     {
-        
+        //  $loggedInUser = $request->user();
+
+        //  return response()->json([
+        //     'status' => true,
+        //     'message' => 'You are logged in',
+        //     'user' => $loggedInUser]);
+
+        //     exit;        
         $validator = Validator::make($request->all(), [
             'name' => 'required|string|max:255',
             'email' => 'required|email',
@@ -377,7 +384,9 @@ class VisitorController extends Controller
             $data['visitor_id_proof'] = 'visitors/id_proof/' . $filename;
         }
 
-        $data['created_by'] = $request->user()->id;
+        $loggedInUser = $request->user();
+        $data['created_by'] = $loggedInUser->id;
+        $data['visit_status'] = (int) $loggedInUser->role === 3 ? 1 : 0;
 
 
         $visitor = Visitor::create($data);
