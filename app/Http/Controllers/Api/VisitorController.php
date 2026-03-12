@@ -1094,6 +1094,75 @@ class VisitorController extends Controller
         ]);
     }
 
+    public function updateGateKeeperVisitorDocuments(Request $request, $id)
+    {
+        $user = $request->user();
+
+        if (! $user || (int) $user->role !== 4) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Only Gate Keeper can update visitor documents',
+            ], 403);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'profile_image' => 'required|file|mimes:jpg,jpeg,png|max:2048',
+            'visitor_id_proof' => 'required|file|mimes:jpg,jpeg,png,pdf|max:2048',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Validation errors',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $visitor = Visitor::find($id);
+
+        if (! $visitor) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Visitor not found',
+            ], 404);
+        }
+
+        $profileImage = $request->file('profile_image');
+        $profileImageName = time() . '_profile_' . uniqid() . '.' . $profileImage->getClientOriginalExtension();
+        $profileDestination = public_path('visitors/profile');
+
+        if (! file_exists($profileDestination)) {
+            mkdir($profileDestination, 0755, true);
+        }
+
+        $profileImage->move($profileDestination, $profileImageName);
+
+        $idProof = $request->file('visitor_id_proof');
+        $idProofName = time() . '_idproof_' . uniqid() . '.' . $idProof->getClientOriginalExtension();
+        $idProofDestination = public_path('visitors/id_proof');
+
+        if (! file_exists($idProofDestination)) {
+            mkdir($idProofDestination, 0755, true);
+        }
+
+        $idProof->move($idProofDestination, $idProofName);
+
+        $visitor->update([
+            'profile_image' => 'visitors/profile/' . $profileImageName,
+            'visitor_id_proof' => 'visitors/id_proof/' . $idProofName,
+        ]);
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Visitor documents updated successfully',
+            'data' => [
+                'visitor_id' => $visitor->id,
+                'profile_image' => $visitor->profile_image,
+                'visitor_id_proof' => $visitor->visitor_id_proof,
+            ],
+        ]);
+    }
+
 
    public function testFirebaseNotification()
 {

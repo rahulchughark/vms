@@ -34,6 +34,7 @@ Route::post('/visitors/{id}/approve', [VisitorController::class, 'approveVisitor
 Route::post('/visitors/card-number', [VisitorController::class, 'updateCardNumber']);
 Route::post('/visitors/{id}/exit', [VisitorController::class, 'updateExitStatus']);
 Route::post('/visitors/{id}/action', [VisitorController::class, 'updateVisitorAction']);
+Route::post('/visitors/{id}/documents', [VisitorController::class, 'updateGateKeeperVisitorDocuments']);
 Route::post('/manage-visit-status', [VisitorController::class, 'manageVisitStatus']);
 Route::post('/manage-exit-status', [VisitorController::class, 'manageExitStatus']);
 });
