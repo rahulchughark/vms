@@ -453,6 +453,32 @@ class VisitorController extends Controller
         //         ->subject('New Visitor Scheduled - ' . $data['name']);
         // });
 
+        // Send notification to meet_person_email user
+        $meetUser = User::where('email', $data['meet_person_email'])->first();
+        if ($meetUser) {
+            $title = 'New Visitor Arrived';
+            $message = $data['name'] . ' has arrived to meet you.';
+            $notification = Notification::create([
+                'user_id' => $meetUser->id,
+                'visitor_id' => $visitor->id,
+                'title' => $title,
+                'message' => $message,
+                'status' => 0,
+            ]);
+            $tokens = UserDevice::where('user_id', $meetUser->id)
+                ->where('is_active', 1)
+                ->pluck('device_token');
+            $sent = false;
+            foreach ($tokens as $token) {
+                if (sendFirebase($token, $title, $message)) {
+                    $sent = true;
+                }
+            }
+            if ($sent) {
+                $notification->update(['status' => 1]);
+            }
+        }
+
         return response()->json([
             'status' => true,
             'message' => 'Visitor added successfully',
