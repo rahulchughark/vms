@@ -26,6 +26,24 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const messaging = firebase.messaging();
 
+// Foreground notification handler
+messaging.onMessage(function(payload) {
+    const notification = payload.notification || {};
+    // Show a browser notification popup
+    if (Notification.permission === 'granted') {
+        new Notification(notification.title || 'Notification', {
+            body: notification.body || '',
+            icon: notification.icon || '/favicon.ico',
+            data: payload.data || {}
+        });
+    }
+    // Also show in-page for demo
+    document.getElementById('token').innerText =
+        'Foreground notification received!\\n' +
+        'Title: ' + (notification.title || '') + '\\n' +
+        'Body: ' + (notification.body || '') + '\\n';
+});
+
 function getToken() {
     Notification.requestPermission().then(permission => {
         if (permission === 'granted') {

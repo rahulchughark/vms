@@ -36,6 +36,7 @@ return [
     ],
 
     'firebase' => [
+    'server_key' => env('FIREBASE_SERVER_KEY', env('FIREBASE_VAPID_KEY')),
     'api_key' => env('FIREBASE_API_KEY'),
     'auth_domain' => env('FIREBASE_AUTH_DOMAIN'),
     'project_id' => env('FIREBASE_PROJECT_ID'),

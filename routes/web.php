@@ -13,4 +13,8 @@ Route::get('/fcm-test', function () {
     return view('fcm-test');
 });
 
-Route::get('/test-firebase', [VisitorController::class, 'testFirebaseNotification']);
+// Route::get('/test-firebase', [VisitorController::class, 'testFirebaseNotification']);
+
+// Route::get('/fcm-keypair', function () {
+//     return view('fcm-keypair');
+// });

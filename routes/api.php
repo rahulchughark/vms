@@ -37,4 +37,8 @@ Route::post('/visitors/{id}/action', [VisitorController::class, 'updateVisitorAc
 Route::post('/visitors/{id}/documents', [VisitorController::class, 'updateGateKeeperVisitorDocuments']);
 Route::post('/manage-visit-status', [VisitorController::class, 'manageVisitStatus']);
 Route::post('/manage-exit-status', [VisitorController::class, 'manageExitStatus']);
+Route::post('/user-device', [VisitorController::class, 'registerUserDevice']);
 });
+
+// Quick Firebase push test — no auth required
+Route::get('/test-firebase-notification', [VisitorController::class, 'testFirebase']);

@@ -9,7 +9,6 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
-use App\Services\FirebaseNotificationService;
 use App\Services\VisitorStatusService;
 use App\Models\UserDevice;
 use App\Models\User;
@@ -227,6 +226,7 @@ class VisitorController extends Controller
         $visitor->save();
 
         $statusLabel = $this->visitorStatusService->label((int) $request->status);
+        $notification = $this->sendVisitStatusNotification($visitor, (int) $request->status, $statusLabel);
 
         return response()->json([
             'status' => true,
@@ -235,6 +235,7 @@ class VisitorController extends Controller
                 'visitor_id' => $visitor->id,
                 'visit_status' => $visitor->visit_status,
                 'visit_status_label' => $statusLabel,
+                'notification' => $notification,
             ]
         ]);
     }
@@ -796,6 +797,85 @@ class VisitorController extends Controller
         };
     }
 
+    private function sendVisitStatusNotification(Visitor $visitor, int $status, string $statusLabel): array
+    {
+        try {
+            $recipient = null;
+
+            if (!empty($visitor->created_by)) {
+                $recipient = User::select('id')->find($visitor->created_by);
+            }
+
+            if (!$recipient && !empty($visitor->meet_person_email)) {
+                $recipient = User::where('email', $visitor->meet_person_email)
+                    ->select('id')
+                    ->first();
+            }
+
+            if (!$recipient) {
+                return [
+                    'saved' => false,
+                    'sent' => false,
+                    'tokens_count' => 0,
+                    'reason' => 'Recipient user not found',
+                ];
+            }
+
+            $title = 'Visitor Status Updated';
+            $message = "Visitor {$visitor->name} has been {$statusLabel}.";
+
+            $notification = Notification::create([
+                'user_id' => $recipient->id,
+                'visitor_id' => $visitor->id,
+                'title' => $title,
+                'message' => $message,
+                'status' => 0,
+            ]);
+
+            $tokens = UserDevice::where('user_id', $recipient->id)
+                ->where('is_active', 1)
+                ->pluck('device_token');
+
+            if ($tokens->isEmpty()) {
+                return [
+                    'saved' => true,
+                    'sent' => false,
+                    'tokens_count' => 0,
+                    'notification_id' => $notification->id,
+                    'reason' => 'No active device tokens',
+                ];
+            }
+
+            $sentCount = 0;
+
+            foreach ($tokens as $token) {
+                if (sendFirebase($token, $title, $message)) {
+                    $sentCount++;
+                }
+            }
+
+            if ($sentCount > 0) {
+                $notification->update(['status' => 1]);
+            }
+
+            return [
+                'saved' => true,
+                'sent' => $sentCount > 0,
+                'tokens_count' => $tokens->count(),
+                'sent_count' => $sentCount,
+                'notification_id' => $notification->id,
+            ];
+        } catch (\Throwable $exception) {
+            return [
+                'saved' => false,
+                'sent' => false,
+                'tokens_count' => 0,
+                'reason' => 'Notification dispatch failed',
+                'error' => $exception->getMessage(),
+            ];
+        }
+    }
+
 
 
 
@@ -1066,24 +1146,33 @@ class VisitorController extends Controller
 
         $visitor->update($updateData);
 
-        // Send email if reassigned
-         if ($request->action_type == 2 && !empty($request->reassign_email)) {
-        $emailData = [
-            'visitor_name' => $visitor->name,
-            'visitor_email' => $visitor->email,
-            'visitor_phone' => $visitor->mobile_no,
-            'company_id' => $visitor->company_id,
-            'reassign_name' => $visitor->reassign_name,
-            'reassign_email' => $visitor->reassign_email,
-            'action_by' => $request->user()->name ?? 'System',
-            'reassign_date' => now()->format('Y-m-d H:i:s'),
-        ];
-
-        // Mail::send('emails.visitor_reassigned', $emailData, function ($message) use ($emailData) {
-        //     $message->to($emailData['reassign_email'])
-        //         ->subject('🔔 Visitor Reassigned - ' . $emailData['visitor_name']);
-        // });
-    }
+        // Send notification if reassigned
+        if ($request->action_type == 2 && !empty($request->reassign_email)) {
+            $reassignUser = User::where('email', $request->reassign_email)->first();
+            if ($reassignUser) {
+                $title = 'Visitor Reassigned';
+                $message = 'A visitor has been reassigned to you: ' . $visitor->name;
+                $notification = Notification::create([
+                    'user_id' => $reassignUser->id,
+                    'visitor_id' => $visitor->id,
+                    'title' => $title,
+                    'message' => $message,
+                    'status' => 0,
+                ]);
+                $tokens = UserDevice::where('user_id', $reassignUser->id)
+                    ->where('is_active', 1)
+                    ->pluck('device_token');
+                $sent = false;
+                foreach ($tokens as $token) {
+                    if (sendFirebase($token, $title, $message)) {
+                        $sent = true;
+                    }
+                }
+                if ($sent) {
+                    $notification->update(['status' => 1]);
+                }
+            }
+        }
 
         $actionLabel = $request->action_type == 1 ? 'cancelled' : 'reassigned';
 
@@ -1165,73 +1254,146 @@ class VisitorController extends Controller
 
 
    public function testFirebaseNotification()
-{
-    // Get all notifications with status 0 (not sent)
-    $notifications = Notification::where('status', 0)->get();
+    {
+        $notifications = Notification::where('status', 0)->get();
 
-    if ($notifications->isEmpty()) {
-        return response()->json([
-            'status' => false,
-            'message' => 'No pending notifications found.'
-        ]);
-    }
-
-    $results = [];
-
-    foreach ($notifications as $notification) {
-      
-
-        // Fetch active device tokens for the user
-        $tokens = UserDevice::where('user_id', $notification->user_id)
-                            ->where('is_active', 1)
-                            ->pluck('device_token');
-
-
-        if ($tokens->isEmpty()) {
-            $results[] = [
-                'notification_id' => $notification->id,
-                'message' => 'No active device tokens'
-            ];
-            continue;
+        if ($notifications->isEmpty()) {
+            return response()->json([
+                'status' => false,
+                'message' => 'No pending notifications found.',
+            ]);
         }
 
-        $sent = false;
+        $results = [];
 
-        
+        foreach ($notifications as $notification) {
+            $tokens = UserDevice::where('user_id', $notification->user_id)
+                ->where('is_active', 1)
+                ->pluck('device_token');
 
-        foreach ($tokens as $token) {
-            $response = sendFirebase($token, $notification->title, $notification->message);
+            if ($tokens->isEmpty()) {
+                $results[] = [
+                    'notification_id' => $notification->id,
+                    'status'          => 'skipped',
+                    'reason'          => 'No active device tokens',
+                ];
+                continue;
+            }
 
-            echo "<pre>";
-            print_r($response);
-            return ;
+            $sent = false;
 
-            $results[] = [
-                'notification_id' => $notification->id,
-                'token' => $token,
-                'response' => $response
-            ];
+            foreach ($tokens as $token) {
+                $success = sendFirebase($token, $notification->title, $notification->message);
 
-            if ($response === true) {
-                $sent = true;
+                $results[] = [
+                    'notification_id' => $notification->id,
+                    'token'           => substr($token, 0, 20) . '…',
+                    'sent'            => $success,
+                ];
+
+                if ($success) {
+                    $sent = true;
+                }
+            }
+
+            if ($sent) {
+                $notification->update(['status' => 1]);
             }
         }
 
-        // Update notification status if sent
-        if ($sent) {
-            $notification->update(['status' => 1]);
-        }
+        return response()->json([
+            'status'  => true,
+            'message' => 'Pending notifications processed',
+            'results' => $results,
+        ]);
     }
 
+    /**
+     * Quick test: send a Firebase push to a given device token (or the first
+     * registered token) with a static title / body.
+     *
+     * Query params (all optional):
+     *   device_token  – target FCM token (falls back to any active token in DB)
+     *   title         – notification title  (default: "Test Notification")
+     *   message       – notification body   (default: "Firebase push is working!")
+     */
+    public function testFirebase(Request $request)
+    {
+        $token = $request->query('device_token');
 
+        if (empty($token)) {
+            $device = UserDevice::where('is_active', 1)->first();
 
-    return response()->json([
-        'status' => true,
-        'message' => 'Pending notifications processed',
-        'results' => $results
-    ]);
-}
+            if (! $device) {
+                return response()->json([
+                    'status'  => false,
+                    'message' => 'No device_token provided and no active token found in DB.',
+                ], 422);
+            }
 
+            $token = $device->device_token;
+        }
 
+        $title   = $request->query('title',   'Test Notification');
+        $message = $request->query('message', 'Firebase push is working! 🎉');
 
+        $success = sendFirebase($token, $title, $message);
+
+        return response()->json([
+            'status'  => $success,
+            'message' => $success ? 'Notification sent successfully.' : 'Notification failed. Check logs for FCM error.',
+            'payload' => [
+                'token_preview' => substr($token, 0, 20) . '…',
+                'title'         => $title,
+                'message'       => $message,
+            ],
+        ]);
+    }
+
+    /**
+     * Register/update a single device per user (authenticated)
+     * POST /api/user-device
+     * Body: { device_token }
+     */
+    public function registerUserDevice(Request $request)
+    {
+        $user = $request->user();
+        if (! $user) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Unauthenticated',
+            ], 401);
+        }
+
+        $validator = Validator::make($request->all(), [
+            'device_token' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'status' => false,
+                'message' => 'Validation errors',
+                'errors' => $validator->errors(),
+            ], 422);
+        }
+
+        $user_id = $user->id;
+        $device_token = $request->device_token;
+
+        // Remove all old devices for this user
+        \App\Models\UserDevice::where('user_id', $user_id)->delete();
+
+        // Create new device entry
+        $device = \App\Models\UserDevice::create([
+            'user_id' => $user_id,
+            'device_token' => $device_token,
+            'is_active' => 1
+        ]);
+
+        return response()->json([
+            'status' => true,
+            'message' => 'Device registered/updated successfully',
+            'device_id' => $device->id,
+        ]);
+    }
 }
