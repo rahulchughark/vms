@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\EmployeeController;
 use App\Http\Controllers\Api\VisitorController;
+use App\Http\Controllers\Api\RoomController;
 use Illuminate\Support\Facades\Mail;
 
 
@@ -23,6 +24,7 @@ Route::get('/test', function () {
     return 'Mail sent';
 });
 
+
 Route::middleware('auth:sanctum')->group(function () {
 Route::post('/logout', [AuthController::class, 'logout']);
 Route::get('/employees', [EmployeeController::class, 'index']);
@@ -38,6 +40,7 @@ Route::post('/visitors/{id}/documents', [VisitorController::class, 'updateGateKe
 Route::post('/manage-visit-status', [VisitorController::class, 'manageVisitStatus']);
 Route::post('/manage-exit-status', [VisitorController::class, 'manageExitStatus']);
 Route::post('/user-device', [VisitorController::class, 'registerUserDevice']);
+Route::get('/rooms', [RoomController::class, 'index']);
 });
 
 // Quick Firebase push test — no auth required

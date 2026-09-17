@@ -39,7 +39,7 @@ use Google\Client;
 
 if (!function_exists('sendFirebase')) {
 
-    function sendFirebase(string $deviceToken, string $title, string $message): bool
+    function sendFirebase(string $deviceToken, string $title, string $message, array $extraData = []): bool
     {
         try {
             $firebaseConfigPath = storage_path('app/firebase/firebase.json');
@@ -63,18 +63,24 @@ if (!function_exists('sendFirebase')) {
             $token = $client->fetchAccessTokenWithAssertion();
             $accessToken = $token['access_token'];
 
+            $messagePayload = [
+                "token" => $deviceToken,
+                "notification" => [
+                    "title" => $title,
+                    "body"  => $message,
+                ]
+            ];
+
+            if (!empty($extraData)) {
+                $messagePayload["data"] = array_map(fn($v) => (string) $v, $extraData);
+            }
+
             // Step 3: Send Notification
             $response = Http::withHeaders([
                 'Authorization' => 'Bearer ' . $accessToken,
                 'Content-Type'  => 'application/json',
             ])->post("https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send", [
-                "message" => [
-                    "token" => $deviceToken,
-                    "notification" => [
-                        "title" => $title,
-                        "body"  => $message,
-                    ]
-                ]
+                "message" => $messagePayload
             ]);
 
             \Log::info('FCM V1 Response: ' . $response->body());

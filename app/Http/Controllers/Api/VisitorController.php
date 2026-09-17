@@ -13,6 +13,7 @@ use App\Services\VisitorStatusService;
 use App\Models\UserDevice;
 use App\Models\User;
 use App\Models\Notification;
+use App\Services\FirebaseService;
 
 class VisitorController extends Controller
 {
@@ -150,6 +151,54 @@ class VisitorController extends Controller
             $visitor->visit_status = 4; // In Progress
             $visitor->save();
 
+            $meetUser = User::where('email', $visitor->meet_person_email)->first();
+
+            if ($meetUser) {
+                $title = 'Visitor Arrived';
+
+                $message = $visitor->name .
+                    ' has been issued Card No: ' .
+                    $visitor->card_number .
+                    '. They are on their way to meet you.';
+
+                $extraData = [
+                    'visitor_id'  => (string) $visitor->id,
+                    'card_number' => (string) $visitor->card_number,
+                    'type'        => 'GATE_PASS_ISSUED',
+                    'target_tab'  => 'IN_PROGRESS',
+                ];
+
+                // Save notification
+                $notification = Notification::create([
+                    'user_id' => $meetUser->id,
+                    'visitor_id' => $visitor->id,
+                    'title' => $title,
+                    'message' => $message,
+                    'status' => 0,
+                ]);
+
+                // Get active tokens
+                $tokens = UserDevice::where('user_id', $meetUser->id)
+                    ->where('is_active', 1)
+                    ->pluck('device_token');
+
+                $firebase = app(FirebaseService::class);
+                $sent = false;
+
+                foreach ($tokens as $token) {
+                    if ($firebase->send($token, $title, $message, $extraData)) {
+                        $sent = true;
+                    }
+                }
+
+                if ($sent) {
+                    $notification->update([
+                        'status' => 1
+                    ]);
+                }
+            }
+
+
             return response()->json([
                 'status' => true,
                 'message' => 'Card number updated successfully',
@@ -174,7 +223,8 @@ class VisitorController extends Controller
      *         @OA\JsonContent(
      *             required={"visitor_id", "status"},
      *             @OA\Property(property="visitor_id", type="integer", example=1),
-     *             @OA\Property(property="status", type="integer", example=1, description="0:Pending, 1:Approve, 2:Reject, 3:Completed")
+     *             @OA\Property(property="status", type="integer", example=1, description="0:Pending, 1:Approve, 2:Reject, 3:Completed"),
+     *             @OA\Property(property="room_id", type="integer", example=1, description="Required if status is 1")
      *         )
      *     ),
      *     @OA\Response(
@@ -196,6 +246,7 @@ class VisitorController extends Controller
         $validator = Validator::make($request->all(), [
             'visitor_id' => 'required|integer|exists:visitors,id',
             'status' => 'required|integer|in:1,2',
+            'room_id' => 'required_if:status,1|nullable|integer|exists:rooms,id',
         ]);
 
         if ($validator->fails()) {
@@ -223,10 +274,83 @@ class VisitorController extends Controller
         }
 
         $visitor->visit_status = $request->status;
+        $visitor->room_id = (int) $request->status === 1 ? $request->room_id : null;
         $visitor->save();
 
         $statusLabel = $this->visitorStatusService->label((int) $request->status);
-        $notification = $this->sendVisitStatusNotification($visitor, (int) $request->status, $statusLabel);
+
+        $createdUser = User::where('id', $visitor->created_by)->first();
+
+        if ($createdUser) {
+
+            $employeeName = auth()->user()->name ?? 'Employee';
+
+            // Approve
+            if ((int) $request->status === 1) {
+
+                $title = 'Visitor Approved';
+                $message = $visitor->name . ' has been approved by ' . $employeeName . '. Issue a pass.';
+                $extraData = [
+                    'visitor_id'   => (string) $visitor->id,
+                    'visitor_name' => (string) $visitor->name,
+                    'status'       => 'APPROVED',
+                    'type'         => 'STATUS_UPDATE',
+                    'target_tab'   => 'APPROVED',
+                ];
+
+            // Reject
+            } elseif ((int) $request->status === 2) {
+
+                $title = 'Visitor Rejected';
+                $message = 'Entry denied for ' . $visitor->name . ' by ' . $employeeName . '.';
+                $extraData = [
+                    'visitor_id'   => (string) $visitor->id,
+                    'visitor_name' => (string) $visitor->name,
+                    'status'       => 'REJECTED',
+                    'type'         => 'STATUS_UPDATE',
+                    'target_tab'   => 'COMPLETED',
+                ];
+
+            // Default
+            } else {
+
+                $title = 'Visitor ' . $statusLabel;
+                $message = $visitor->name . ' has been ' . strtolower($statusLabel) . '.';
+                $extraData = [
+                    'visitor_id'   => (string) $visitor->id,
+                    'visitor_name' => (string) $visitor->name,
+                    'status'       => strtoupper($statusLabel),
+                    'type'         => 'STATUS_UPDATE',
+                    'target_tab'   => strtoupper($statusLabel),
+                ];
+            }
+
+            $notification = Notification::create([
+                'user_id' => $createdUser->id,
+                'visitor_id' => $visitor->id,
+                'title' => $title,
+                'message' => $message,
+                'status' => 0,
+            ]);
+
+            $tokens = UserDevice::where('user_id', $createdUser->id)
+                ->where('is_active', 1)
+                ->pluck('device_token');
+
+            $firebase = app(FirebaseService::class);
+
+            $sent = false;
+
+            foreach ($tokens as $token) {
+                if ($firebase->send($token, $title, $message, $extraData)) {
+                    $sent = true;
+                }
+            }
+
+            if ($sent) {
+                $notification->update(['status' => 1]);
+            }
+        }
 
         return response()->json([
             'status' => true,
@@ -235,6 +359,7 @@ class VisitorController extends Controller
                 'visitor_id' => $visitor->id,
                 'visit_status' => $visitor->visit_status,
                 'visit_status_label' => $statusLabel,
+                'room_id' => $visitor->room_id,
                 'notification' => $notification,
             ]
         ]);
@@ -317,179 +442,180 @@ class VisitorController extends Controller
      *     )
      * )
      */
-    public function store(Request $request)
-    {
-        //  $loggedInUser = $request->user();
+    //Commented : 04-09-2026
+    // public function store(Request $request)
+    // {
+    //     //  $loggedInUser = $request->user();
 
-        //  return response()->json([
-        //     'status' => true,
-        //     'message' => 'You are logged in',
-        //     'user' => $loggedInUser]);
+    //     //  return response()->json([
+    //     //     'status' => true,
+    //     //     'message' => 'You are logged in',
+    //     //     'user' => $loggedInUser]);
 
-        //     exit;        
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'email' => 'required|email',
-            'mobile_no' => 'required|string|max:20',
-            'profile_image' => 'nullable|file|mimes:jpg,jpeg,png|max:2048',
-            'visitor_id_proof' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
-            'company_id' => 'required|string|max:50',
-            'meet_person_name' => 'required|string|max:255',
-            'meet_person_email' => 'required|email',
-            'purpose' => 'required|string|max:500',
-            'visit_date' => 'required|date_format:Y-m-d',
-            'approx_total_time' => 'required',
-            'in_time' => 'required|date_format:H:i:s',
-            'visit_status' => 'nullable|integer|in:0,1,2,3,4',
-        ]);
+    //     //     exit;        
+    //     $validator = Validator::make($request->all(), [
+    //         'name' => 'required|string|max:255',
+    //         'email' => 'required|email',
+    //         'mobile_no' => 'required|string|max:20',
+    //         'profile_image' => 'nullable|file|mimes:jpg,jpeg,png|max:2048',
+    //         'visitor_id_proof' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
+    //         'company_id' => 'required|string|max:50',
+    //         'meet_person_name' => 'required|string|max:255',
+    //         'meet_person_email' => 'required|email',
+    //         'purpose' => 'required|string|max:500',
+    //         'visit_date' => 'required|date_format:Y-m-d',
+    //         'approx_total_time' => 'required',
+    //         'in_time' => 'required|date_format:H:i:s',
+    //         'visit_status' => 'nullable|integer|in:0,1,2,3,4',
+    //     ]);
 
-        if ($validator->fails()) {
-            return response()->json([
-                'status' => false,
-                'message' => 'Validation errors',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
+    //     if ($validator->fails()) {
+    //         return response()->json([
+    //             'status' => false,
+    //             'message' => 'Validation errors',
+    //             'errors' => $validator->errors(),
+    //         ], 422);
+    //     }
 
-        $data = $validator->validated();
+    //     $data = $validator->validated();
 
-        // Handle profile_image upload to public folder
-        if ($request->hasFile('profile_image')) {
-            $file = $request->file('profile_image');
-            $filename = time() . '_profile_' . uniqid() . '.' . $file->getClientOriginalExtension();
-            $destinationPath = public_path('visitors/profile');
+    //     // Handle profile_image upload to public folder
+    //     if ($request->hasFile('profile_image')) {
+    //         $file = $request->file('profile_image');
+    //         $filename = time() . '_profile_' . uniqid() . '.' . $file->getClientOriginalExtension();
+    //         $destinationPath = public_path('visitors/profile');
             
-            // Create directory if it doesn't exist
-            if (!file_exists($destinationPath)) {
-                mkdir($destinationPath, 0755, true);
-            }
+    //         // Create directory if it doesn't exist
+    //         if (!file_exists($destinationPath)) {
+    //             mkdir($destinationPath, 0755, true);
+    //         }
             
-            $file->move($destinationPath, $filename);
-            $data['profile_image'] = 'visitors/profile/' . $filename;
-        }
+    //         $file->move($destinationPath, $filename);
+    //         $data['profile_image'] = 'visitors/profile/' . $filename;
+    //     }
 
         
-        // Handle visitor_id_proof upload to public folder
-        if ($request->hasFile('visitor_id_proof')) {
-            $file = $request->file('visitor_id_proof');
-            $filename = time() . '_idproof_' . uniqid() . '.' . $file->getClientOriginalExtension();
-            $destinationPath = public_path('visitors/id_proof');
+    //     // Handle visitor_id_proof upload to public folder
+    //     if ($request->hasFile('visitor_id_proof')) {
+    //         $file = $request->file('visitor_id_proof');
+    //         $filename = time() . '_idproof_' . uniqid() . '.' . $file->getClientOriginalExtension();
+    //         $destinationPath = public_path('visitors/id_proof');
             
-            // Create directory if it doesn't exist
-            if (!file_exists($destinationPath)) {
-                mkdir($destinationPath, 0755, true);
-            }
+    //         // Create directory if it doesn't exist
+    //         if (!file_exists($destinationPath)) {
+    //             mkdir($destinationPath, 0755, true);
+    //         }
             
-            $file->move($destinationPath, $filename);
-            $data['visitor_id_proof'] = 'visitors/id_proof/' . $filename;
-        }
+    //         $file->move($destinationPath, $filename);
+    //         $data['visitor_id_proof'] = 'visitors/id_proof/' . $filename;
+    //     }
 
-        $loggedInUser = $request->user();
-        $data['created_by'] = $loggedInUser->id;
-        $data['visit_status'] = (int) $loggedInUser->role === 3 ? 1 : 0;
+    //     $loggedInUser = $request->user();
+    //     $data['created_by'] = $loggedInUser->id;
+    //     $data['visit_status'] = (int) $loggedInUser->role === 3 ? 1 : 0;
 
 
-        $visitor = Visitor::create($data);
+    //     $visitor = Visitor::create($data);
 
-        // Set card_number as ARK00{id}
-        // $visitor->card_number = 'ARK00' . $visitor->id;
-        // $visitor->save();
+    //     // Set card_number as ARK00{id}
+    //     // $visitor->card_number = 'ARK00' . $visitor->id;
+    //     // $visitor->save();
 
-         /*
-        |--------------------------------------------------------------------------
-        | FIREBASE NOTIFICATION START
-        |--------------------------------------------------------------------------
-        */
+    //      /*
+    //     |--------------------------------------------------------------------------
+    //     | FIREBASE NOTIFICATION START
+    //     |--------------------------------------------------------------------------
+    //     */
 
-        // Find meeting user by email
-        $user = User::where('id', 1)
-            ->select('id')
-            ->first();
+    //     // Find meeting user by email
+    //     $user = User::where('id', 1)
+    //         ->select('id')
+    //         ->first();
 
-        if ($user) {
-            $title   = 'New Visitor Arrived';
-            $message = $data['name'] . ' has arrived to meet you.';
+    //     if ($user) {
+    //         $title   = 'New Visitor Arrived';
+    //         $message = $data['name'] . ' has arrived to meet you.';
 
-            // Save notification
-            // $notification = Notification::create([
-            //     'user_id'    => $user->id,
-            //     'visitor_id'=> $visitor->id,
-            //     'title'      => $title,
-            //     'message'    => $message,
-            //     'status'     => 0,
-            // ]);
+    //         // Save notification
+    //         // $notification = Notification::create([
+    //         //     'user_id'    => $user->id,
+    //         //     'visitor_id'=> $visitor->id,
+    //         //     'title'      => $title,
+    //         //     'message'    => $message,
+    //         //     'status'     => 0,
+    //         // ]);
 
-            // Get active device tokens
-            // $tokens = UserDevice::where('user_id', $user->id)
-            //                     ->where('is_active', 1)
-            //                     ->pluck('device_token');
+    //         // Get active device tokens
+    //         // $tokens = UserDevice::where('user_id', $user->id)
+    //         //                     ->where('is_active', 1)
+    //         //                     ->pluck('device_token');
 
-            // $sent = false;
+    //         // $sent = false;
 
-            // foreach ($tokens as $token) {
-            //     $response = sendFirebase($token, $title, $message);
+    //         // foreach ($tokens as $token) {
+    //         //     $response = sendFirebase($token, $title, $message);
 
-            //     if ($response === true) {
-            //         $sent = true;
-            //     }
-            // }
+    //         //     if ($response === true) {
+    //         //         $sent = true;
+    //         //     }
+    //         // }
 
-            // Mark notification as sent ONLY if push attempted
-            // if ($sent) {
-            //     $notification->update([
-            //         'status' => 1
-            //     ]);
-            // }
-        }
+    //         // Mark notification as sent ONLY if push attempted
+    //         // if ($sent) {
+    //         //     $notification->update([
+    //         //         'status' => 1
+    //         //     ]);
+    //         // }
+    //     }
 
-        /*
-        |--------------------------------------------------------------------------
-        | FIREBASE NOTIFICATION END
-        |--------------------------------------------------------------------------
-        */
+    //     /*
+    //     |--------------------------------------------------------------------------
+    //     | FIREBASE NOTIFICATION END
+    //     |--------------------------------------------------------------------------
+    //     */
 
-        // Mail::send('emails.visitor-created', $data, function ($message) use ($data) {
-        //     $message->to($data['meet_person_email'])
-        //         ->subject('New Visitor Scheduled - ' . $data['name']);
-        // });
+    //     // Mail::send('emails.visitor-created', $data, function ($message) use ($data) {
+    //     //     $message->to($data['meet_person_email'])
+    //     //         ->subject('New Visitor Scheduled - ' . $data['name']);
+    //     // });
 
-        // Send notification to meet_person_email user
-        $meetUser = User::where('email', $data['meet_person_email'])->first();
-        if ($meetUser) {
-            $title = 'New Visitor Arrived';
-            $message = $data['name'] . ' has arrived to meet you.';
-            $notification = Notification::create([
-                'user_id' => $meetUser->id,
-                'visitor_id' => $visitor->id,
-                'title' => $title,
-                'message' => $message,
-                'status' => 0,
-            ]);
-            $tokens = UserDevice::where('user_id', $meetUser->id)
-                ->where('is_active', 1)
-                ->pluck('device_token');
-            $sent = false;
-            foreach ($tokens as $token) {
-                if (sendFirebase($token, $title, $message)) {
-                    $sent = true;
-                }
-            }
-            if ($sent) {
-                $notification->update(['status' => 1]);
-            }
-        }
+    //     // Send notification to meet_person_email user
+    //     $meetUser = User::where('email', $data['meet_person_email'])->first();
+    //     if ($meetUser) {
+    //         $title = 'New Visitor Arrived';
+    //         $message = $data['name'] . ' has arrived to meet you.';
+    //         $notification = Notification::create([
+    //             'user_id' => $meetUser->id,
+    //             'visitor_id' => $visitor->id,
+    //             'title' => $title,
+    //             'message' => $message,
+    //             'status' => 0,
+    //         ]);
+    //         $tokens = UserDevice::where('user_id', $meetUser->id)
+    //             ->where('is_active', 1)
+    //             ->pluck('device_token');
+    //         $sent = false;
+    //         foreach ($tokens as $token) {
+    //             if (sendFirebase($token, $title, $message)) {
+    //                 $sent = true;
+    //             }
+    //         }
+    //         if ($sent) {
+    //             $notification->update(['status' => 1]);
+    //         }
+    //     }
 
-        return response()->json([
-            'status' => true,
-            'message' => 'Visitor added successfully',
-            'data' => [
-                // 'card_number' => $visitor->card_number,
-                'name' => $visitor->name,
-                'email' => $visitor->email,
-                'mobile_no' => $visitor->mobile_no,
-            ],
-        ], 201);
-    }
+    //     return response()->json([
+    //         'status' => true,
+    //         'message' => 'Visitor added successfully',
+    //         'data' => [
+    //             // 'card_number' => $visitor->card_number,
+    //             'name' => $visitor->name,
+    //             'email' => $visitor->email,
+    //             'mobile_no' => $visitor->mobile_no,
+    //         ],
+    //     ], 201);
+    // }
 
     /**
  * @OA\Get(
@@ -631,6 +757,7 @@ class VisitorController extends Controller
             card_number,
             exit_date,
             exit_time,
+            room_id,
             created_at,
             CASE visit_status
                 WHEN 0 THEN 'Pending'
@@ -727,6 +854,7 @@ class VisitorController extends Controller
                 'card_number',
                 'exit_date',
                 'exit_time',
+                'room_id',
                 'reassign_email',
                 'created_at',
             ])
@@ -1176,8 +1304,18 @@ class VisitorController extends Controller
         if ($request->action_type == 2 && !empty($request->reassign_email)) {
             $reassignUser = User::where('email', $request->reassign_email)->first();
             if ($reassignUser) {
-                $title = 'Visitor Reassigned';
-                $message = 'A visitor has been reassigned to you: ' . $visitor->name;
+                $originalEmployeeName = auth()->user()->name ?? 'Employee';
+                $title = 'New Visitor Reassigned';
+                $message = 'A visitor (' . $visitor->name . ') has been reassigned to you by ' . $originalEmployeeName . '.';
+
+                $extraData = [
+                    'visitor_id'    => (string) $visitor->id,
+                    'visitor_name'  => (string) $visitor->name,
+                    'reassigned_by' => (string) $originalEmployeeName,
+                    'type'          => 'VISITOR_REASSIGNED',
+                    'target_tab'    => 'APPROVED',
+                ];
+
                 $notification = Notification::create([
                     'user_id' => $reassignUser->id,
                     'visitor_id' => $visitor->id,
@@ -1185,15 +1323,20 @@ class VisitorController extends Controller
                     'message' => $message,
                     'status' => 0,
                 ]);
+
                 $tokens = UserDevice::where('user_id', $reassignUser->id)
                     ->where('is_active', 1)
                     ->pluck('device_token');
+
+                $firebase = app(FirebaseService::class);
                 $sent = false;
+
                 foreach ($tokens as $token) {
-                    if (sendFirebase($token, $title, $message)) {
+                    if ($firebase->send($token, $title, $message, $extraData)) {
                         $sent = true;
                     }
                 }
+
                 if ($sent) {
                     $notification->update(['status' => 1]);
                 }
@@ -1345,9 +1488,22 @@ class VisitorController extends Controller
      */
     public function testFirebase(Request $request)
     {
+        $userId = $request->query('user_id');
         $token = $request->query('device_token');
 
-        if (empty($token)) {
+        if (!empty($userId)) {
+            $device = UserDevice::where('user_id', $userId)->where('is_active', 1)->first()
+                      ?? UserDevice::where('user_id', $userId)->first();
+
+            if (! $device) {
+                return response()->json([
+                    'status'  => false,
+                    'message' => "No device_token found for user_id {$userId}.",
+                ], 404);
+            }
+
+            $token = $device->device_token;
+        } elseif (empty($token)) {
             $device = UserDevice::where('is_active', 1)->first();
 
             if (! $device) {
@@ -1363,13 +1519,15 @@ class VisitorController extends Controller
         $title   = $request->query('title',   'Test Notification');
         $message = $request->query('message', 'Firebase push is working! 🎉');
 
-        $success = sendFirebase($token, $title, $message);
+        $firebase = app(FirebaseService::class);
+        $success  = $firebase->send($token, $title, $message);
 
         return response()->json([
             'status'  => $success,
             'message' => $success ? 'Notification sent successfully.' : 'Notification failed. Check logs for FCM error.',
             'payload' => [
-                'token_preview' => substr($token, 0, 20) . '…',
+                'user_id'       => $userId ?? ($device->user_id ?? null),
+                'token_preview' => substr($token, 0, 30) . '…',
                 'title'         => $title,
                 'message'       => $message,
             ],
@@ -1422,4 +1580,131 @@ class VisitorController extends Controller
             'device_id' => $device->id,
         ]);
     }
+
+
+    
+
+public function store(Request $request)
+        {
+            $validator = Validator::make($request->all(), [
+                'name' => 'required|string|max:255',
+                'email' => 'required|email',
+                'mobile_no' => 'required|string|max:20',
+                'profile_image' => 'nullable|file|mimes:jpg,jpeg,png|max:2048',
+                'visitor_id_proof' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
+                'company_id' => 'required|string|max:50',
+                'meet_person_name' => 'required|string|max:255',
+                'meet_person_email' => 'required|email',
+                'purpose' => 'required|string|max:500',
+                'visit_date' => 'required|date_format:Y-m-d',
+                'approx_total_time' => 'required',
+                'in_time' => 'required|date_format:H:i:s',
+                'visit_status' => 'nullable|integer|in:0,1,2,3,4',
+                'room_id' => 'nullable|integer|exists:rooms,id',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'status' => false,
+                    'message' => 'Validation errors',
+                    'errors' => $validator->errors(),
+                ], 422);
+            }
+
+            $data = $validator->validated();
+
+            // Upload logic (same as yours)
+            if ($request->hasFile('profile_image')) {
+                $file = $request->file('profile_image');
+                $filename = time() . '_profile_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                $path = public_path('visitors/profile');
+                if (!file_exists($path)) mkdir($path, 0755, true);
+                $file->move($path, $filename);
+                $data['profile_image'] = 'visitors/profile/' . $filename;
+            }
+
+            if ($request->hasFile('visitor_id_proof')) {
+                $file = $request->file('visitor_id_proof');
+                $filename = time() . '_idproof_' . uniqid() . '.' . $file->getClientOriginalExtension();
+                $path = public_path('visitors/id_proof');
+                if (!file_exists($path)) mkdir($path, 0755, true);
+                $file->move($path, $filename);
+                $data['visitor_id_proof'] = 'visitors/id_proof/' . $filename;
+            }
+
+            $loggedInUser = $request->user();
+            $data['created_by'] = $loggedInUser->id;
+            if ((int) $loggedInUser->role === 3) {
+                $data['visit_status'] = 1;
+                $data['approval_status'] = 1;
+                $data['approved_by'] = $loggedInUser->id;
+            } else {
+                $data['visit_status'] = 0;
+                $data['approval_status'] = 0;
+            }
+
+            $visitor = Visitor::create($data);
+
+            /*
+            |--------------------------------------------------------------------------
+            | FIREBASE NOTIFICATION (FIXED)
+            |--------------------------------------------------------------------------
+            */
+
+            $meetUser = User::where('email', $data['meet_person_email'])->first();
+
+            if ($meetUser) {
+
+                $title = 'New Visitor Request';
+                $message = $visitor->name . ' is waiting at the gate for: ' . $visitor->purpose;
+
+                $extraData = [
+                    'visitor_id'   => (string) $visitor->id,
+                    'visitor_name' => (string) $visitor->name,
+                    'purpose'      => (string) $visitor->purpose,
+                    'type'         => 'VISITOR_REQUEST',
+                    'target_tab'   => 'PENDING',
+                ];
+
+                // Save notification
+                $notification = Notification::create([
+                    'user_id' => $meetUser->id,
+                    'visitor_id' => $visitor->id,
+                    'title' => $title,
+                    'message' => $message,
+                    'status' => 0,
+                ]);
+
+                // Get tokens
+                $tokens = UserDevice::where('user_id', $meetUser->id)
+                    ->where('is_active', 1)
+                    ->pluck('device_token');
+
+                $firebase = app(FirebaseService::class);
+
+                $sent = false;
+
+                foreach ($tokens as $token) {
+                    if ($firebase->send($token, $title, $message, $extraData)) {
+                        $sent = true;
+                    }
+                }
+
+                if ($sent) {
+                    $notification->update(['status' => 1]);
+                }
+            }
+
+            return response()->json([
+                'status' => true,
+                'message' => 'Visitor added successfully',
+                'data' => [
+                    'name' => $visitor->name,
+                    'email' => $visitor->email,
+                    'mobile_no' => $visitor->mobile_no,
+                ],
+            ], 201);
+        }
+
+
 }

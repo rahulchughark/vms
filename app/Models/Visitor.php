@@ -12,11 +12,14 @@ class Visitor extends Model
     
      protected $fillable = [
         'name', 'email', 'mobile_no', 'profile_image', 'visitor_id_proof',
-        'company_id', 'meet_person_name', 'meet_person_email', 'purpose',
+        'company_id', 'meet_person_name', 'meet_person_email', 'purpose', 'room_id',
           'visit_date', 'approx_total_time', 'in_time', 'visit_status', 'approval_status', 'approved_by',
         'card_number', 'exit_date', 'exit_time', 'created_by',
         'action_type', 'reassign_name', 'reassign_email', 'reassign_phone',
     ];
 
-
+    public function room()
+    {
+        return $this->belongsTo(Room::class, 'room_id');
+    }
 }
